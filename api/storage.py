@@ -146,6 +146,9 @@ def pending_decisions(limit=200):
            f"LEFT JOIN (SELECT DISTINCT decision_id AS aid FROM `{PROJECT}.{DATASET}.maintenance_actions`) a "
            f"ON a.aid = d.decision_id "
            f"WHERE d.approval_status = 'PENDING' AND a.aid IS NULL "
+           f"AND (d.run_id IS NULL OR d.run_id IN ("
+           f"SELECT ARRAY_AGG(run_id ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] "
+           f"FROM `{PROJECT}.{DATASET}.agent_decisions` WHERE run_id IS NOT NULL GROUP BY machine_id)) "
            f"ORDER BY d.risk_score DESC LIMIT {int(limit)}")
     return [_plain(dict(r.items())) for r in c.query(sql).result()]
 
