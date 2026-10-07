@@ -233,4 +233,3 @@ def check_drift():
         }
 
     return result
-this is not python
