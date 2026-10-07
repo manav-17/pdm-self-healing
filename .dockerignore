@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+.env
+.env.bak
+data/raw/
+data/*.jsonl
+data/processed/*ALL*
+models/
+notebooks/
+tests/
+*.pdf
+*.pptx
+*.docx
