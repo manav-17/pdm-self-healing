@@ -1,0 +1,8 @@
+streamlit
+requests
+pandas
+pyarrow
+db-dtypes
+google-cloud-bigquery
+google-cloud-secret-manager
+google-auth

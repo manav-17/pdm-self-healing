@@ -160,7 +160,14 @@ def submit_decision(decision: dict):
 @app.get("/decisions/pending")
 def pending():
     """Support endpoint for the dashboard: list decisions awaiting approval."""
-    return {"count": len(_pending), "decisions": list(_pending.values())}
+    try:
+        decisions = storage.pending_decisions()
+    except Exception as e:
+        print(f"[pending] BigQuery read failed: {e}")
+        decisions = None
+    if decisions is None:
+        decisions = list(_pending.values())
+    return {"count": len(decisions), "decisions": decisions}
 
 
 @app.post("/approvals/{decision_id}")
@@ -171,7 +178,9 @@ def approve(decision_id: str, req: ApprovalRequest):
     """
     decision = _pending.get(decision_id)
     if decision is None:
-        raise HTTPException(404, f"no pending decision {decision_id}")
+        decision = storage.get_decision(decision_id)
+        if decision is None or decision.get("acted"):
+            raise HTTPException(404, f"no pending decision {decision_id}")
 
     decision["approval_status"] = req.decision
     decision["approved_by"] = req.approver
@@ -195,7 +204,7 @@ def approve(decision_id: str, req: ApprovalRequest):
                    "machine_id": decision["machine_id"],
                    "action_taken": decision["recommended_action"]},
         req.decision, req.approver, req.note)
-    del _pending[decision_id]
+    _pending.pop(decision_id, None)
 
     return {"decision_id": decision_id, "approval_status": req.decision,
             "action_generated": action is not None, "action": action}

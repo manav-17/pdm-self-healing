@@ -1,20 +1,41 @@
 steps:
-  - id: build
+  - id: api-build
     name: gcr.io/cloud-builders/docker
     args: ["build", "-t", "asia-south1-docker.pkg.dev/$PROJECT_ID/pdm-repo/pdm-api:$BUILD_ID", "."]
-  - id: test
+  - id: api-test
     name: gcr.io/cloud-builders/docker
     args: ["run", "--rm", "asia-south1-docker.pkg.dev/$PROJECT_ID/pdm-repo/pdm-api:$BUILD_ID",
-           "python", "-c", "import api.main; print('import test passed')"]
-  - id: push
+           "python", "-c", "import api.main; print('api import test passed')"]
+  - id: api-push
     name: gcr.io/cloud-builders/docker
     args: ["push", "asia-south1-docker.pkg.dev/$PROJECT_ID/pdm-repo/pdm-api:$BUILD_ID"]
-  - id: deploy
+  - id: api-deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: gcloud
     args: ["run", "deploy", "pdm-api",
            "--image=asia-south1-docker.pkg.dev/$PROJECT_ID/pdm-repo/pdm-api:$BUILD_ID",
            "--region=asia-south1", "--quiet"]
+  - id: dash-build
+    name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "dashboard/Dockerfile",
+           "-t", "asia-south1-docker.pkg.dev/$PROJECT_ID/pdm-repo/pdm-dashboard:$BUILD_ID", "."]
+  - id: dash-test
+    name: gcr.io/cloud-builders/docker
+    args: ["run", "--rm", "asia-south1-docker.pkg.dev/$PROJECT_ID/pdm-repo/pdm-dashboard:$BUILD_ID",
+           "python", "-m", "py_compile", "dashboard/app.py"]
+  - id: dash-push
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "asia-south1-docker.pkg.dev/$PROJECT_ID/pdm-repo/pdm-dashboard:$BUILD_ID"]
+  - id: dash-deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args: ["run", "deploy", "pdm-dashboard",
+           "--image=asia-south1-docker.pkg.dev/$PROJECT_ID/pdm-repo/pdm-dashboard:$BUILD_ID",
+           "--region=asia-south1",
+           "--service-account=pdm-dashboard-sa@$PROJECT_ID.iam.gserviceaccount.com",
+           "--set-env-vars=API_URL=https://pdm-api-363641793280.asia-south1.run.app,GCP_PROJECT=$PROJECT_ID,BQ_DATASET=pdm",
+           "--port=8080", "--memory=1Gi", "--min-instances=0", "--max-instances=1",
+           "--session-affinity", "--quiet"]
 options:
   logging: CLOUD_LOGGING_ONLY
-timeout: 1800s
+timeout: 2400s

@@ -129,3 +129,38 @@ if __name__ == "__main__":
     df = query(f"SELECT machine_id, cycle, risk_level FROM `{PROJECT}.{DATASET}.agent_decisions` LIMIT 5")
     print("\nread back:")
     print(df if df is not None else "query failed")
+
+
+def _plain(d):
+    import datetime as _dt
+    return {k: (v.isoformat() if isinstance(v, (_dt.datetime, _dt.date)) else v)
+            for k, v in d.items()}
+
+
+def pending_decisions(limit=200):
+    """Decisions still awaiting a human decision, shared across API instances."""
+    c = client()
+    if c is None:
+        return None
+    sql = (f"SELECT d.* FROM `{PROJECT}.{DATASET}.agent_decisions` d "
+           f"LEFT JOIN (SELECT DISTINCT decision_id AS aid FROM `{PROJECT}.{DATASET}.maintenance_actions`) a "
+           f"ON a.aid = d.decision_id "
+           f"WHERE d.approval_status = 'PENDING' AND a.aid IS NULL "
+           f"ORDER BY d.risk_score DESC LIMIT {int(limit)}")
+    return [_plain(dict(r.items())) for r in c.query(sql).result()]
+
+
+def get_decision(decision_id):
+    """One decision, plus whether a human has already acted on it."""
+    c = client()
+    if c is None:
+        return None
+    from google.cloud import bigquery
+    sql = (f"SELECT d.*, a.aid IS NOT NULL AS acted "
+           f"FROM `{PROJECT}.{DATASET}.agent_decisions` d "
+           f"LEFT JOIN (SELECT DISTINCT decision_id AS aid FROM `{PROJECT}.{DATASET}.maintenance_actions`) a "
+           f"ON a.aid = d.decision_id WHERE d.decision_id = @id LIMIT 1")
+    cfg = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("id", "STRING", decision_id)])
+    rows = list(c.query(sql, job_config=cfg).result())
+    return _plain(dict(rows[0].items())) if rows else None
