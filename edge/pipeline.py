@@ -1,18 +1,17 @@
-"""End-to-end edge pipeline: MQTT -> features -> ML -> agents -> decision.
+"""End-to-end edge pipeline: MQTT -> condition normalisation -> features -> ML
+-> agents -> decision.
 
-Runs at the edge. Every cycle is scored, and its raw reading, features and
-predictions are written to BigQuery. Decisions at or above the escalation
-threshold are submitted to the API (local or Cloud Run), which stores them
-and places them in the operator's approval queue.
+Each reading is assigned to its flight condition and normalised with the
+production normaliser, then rolling features are computed with the same code
+used in training (ml/conditions.py). At start-up the pipeline checks that every
+production model uses the same feature space and refuses to run otherwise.
 
-MQTT receipt is decoupled from processing: the MQTT callback only places
-each message on an in-memory queue, and one worker thread processes the
-queue in order. Slow stages (BigQuery writes, LLM calls, API calls) therefore
-never block the MQTT network loop, which would otherwise make the broker drop
-the connection and discard queued messages.
+MQTT receipt is decoupled from processing: the MQTT callback only queues each
+message and one worker thread processes the queue in order, so slow stages
+(BigQuery, LLM, API) never block the MQTT network loop.
 
-With USE_LLM=true, the LLM diagnosis is requested only for escalated
-decisions. The risk score is deterministic and never depends on the LLM.
+With USE_LLM=true, the LLM diagnosis is requested only for escalated decisions;
+the risk score is deterministic and never depends on the LLM.
 """
 import json
 import os
@@ -32,7 +31,9 @@ import paho.mqtt.client as mqtt  # noqa: E402
 import requests  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
-from edge_service import SensorReading, RollingWindow, BROKER, PORT, TOPIC  # noqa: E402
+from telemetry import SensorReading, BROKER, PORT, TOPIC  # noqa: E402
+from conditions import Normalizer, RollingFeatures, SPACE  # noqa: E402
+import model_store  # noqa: E402
 import inference  # noqa: E402
 import orchestrator  # noqa: E402
 import storage  # noqa: E402
@@ -47,15 +48,23 @@ ESCALATE = {"MEDIUM", "HIGH"}
 
 class Pipeline:
     def __init__(self):
+        nb = model_store.load("normalizer")
+        spaces = {"normalizer": nb.get("space")}
+        for m in ("rul_xgboost", "failure_xgboost", "anomaly_iforest"):
+            spaces[m] = model_store.load(m).get("space")
+        wrong = {m: s for m, s in spaces.items() if s != SPACE}
+        if wrong:
+            raise SystemExit(f"Feature-space mismatch: edge produces {SPACE!r} but production has {wrong}")
+        self.norm = Normalizer.from_dict(nb["normalizer"])
         self.run_id = uuid.uuid4().hex[:8]
-        self.windows = defaultdict(RollingWindow)
+        self.windows = defaultdict(RollingFeatures)
         self.stats = defaultdict(int)
         self.inbox = queue.Queue()
         self.last_llm = 0.0
         self.headers = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
         OUT.parent.mkdir(exist_ok=True)
         self.sink = OUT.open("a")
-        print(f"run_id={self.run_id}  LLM={'on (escalated only)' if USE_LLM else 'off'}  "
+        print(f"run_id={self.run_id}  space={SPACE}  LLM={'on (escalated only)' if USE_LLM else 'off'}  "
               f"model={os.getenv('GEMINI_MODEL', 'default')}  API={API}", flush=True)
 
     def on_connect(self, client, userdata, flags, rc, properties=None):
@@ -79,14 +88,15 @@ class Pipeline:
         t0 = time.time()
         try:
             reading = SensorReading(**json.loads(payload.decode()))
-        except (ValidationError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        except (ValidationError, json.JSONDecodeError, UnicodeDecodeError, TypeError) as e:
             self.stats["rejected"] += 1
             print(f"REJECTED on {topic}: {type(e).__name__}", flush=True)
             return
 
-        storage.save_raw(reading.machine_id, reading.cycle, reading.sensors)
-        feats = self.windows[reading.machine_id].update(reading.sensors)
-        storage.save_features(reading.machine_id, reading.cycle, feats)
+        cond, z = self.norm.transform_row(reading.sensors, reading.op_settings["op_setting_1"])
+        feats = self.windows[reading.machine_id].update(z)
+        storage.save_raw(reading.machine_id, reading.cycle, {**reading.sensors, **reading.op_settings})
+        storage.save_features(reading.machine_id, reading.cycle, {**feats, "_space": SPACE, "condition": cond})
         pred = inference.predict(feats)
         storage.save_prediction(reading.machine_id, reading.cycle, pred)
 
@@ -111,7 +121,7 @@ class Pipeline:
         self.sink.write(json.dumps(row) + "\n")
         self.sink.flush()
 
-        print(f"{decision.machine_id} c{decision.cycle:>3} | "
+        print(f"{decision.machine_id} c{decision.cycle:>3} | cond={cond} "
               f"RUL={pred['rul_estimate']:>5.1f} P(fail)={pred['failure_probability']:.3f} "
               f"anom={pred['anomaly_score']:.3f} | risk={decision.risk_score:.3f} "
               f"{decision.risk_level:<6} | {decision.recommended_action:<21} "
@@ -143,5 +153,5 @@ class Pipeline:
 
 
 if __name__ == "__main__":
-    print("Pipeline: MQTT -> features -> ML -> agents -> decision\n", flush=True)
+    print("Pipeline: MQTT -> normalise -> features -> ML -> agents -> decision\n", flush=True)
     Pipeline().run()

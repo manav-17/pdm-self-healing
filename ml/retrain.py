@@ -1,151 +1,112 @@
-"""MLOps retraining script.
+"""MLOps retraining (TC-MLO-02, TC-MLO-03, TC-MLO-04), v3 feature space.
 
-Triggered when drift_detector reports drift_score > threshold.
-Retrains the RUL and failure models on the full training data,
-validates against the current production model, and either
-promotes or rejects the new model.
-
-Covered by TC-MLO-02, TC-MLO-03, TC-MLO-04.
+Retrains the RUL and failure models on FD001-FD004 (validation split by engine
+for early stopping), scores them on the official test sets, and promotes a
+candidate only if it beats the production model of the SAME feature space.
+Models are never promoted automatically across feature spaces.
 """
 import io
-import uuid
 import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
 import joblib
 import numpy as np
-import pandas as pd
 import xgboost as xgb
-from pathlib import Path
-from datetime import datetime, timezone
-from sklearn.metrics import mean_squared_error, roc_auc_score
+from sklearn.metrics import roc_auc_score
 
-PROC    = Path(__file__).resolve().parent.parent / "data" / "processed"
-PROJECT = "project-c3e3f3ae-71cf-45cb-800"
-DATASET = "pdm"
-BUCKET  = "pdm-models-363641793280"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from conditions import FEATURES, SPACE  # noqa: E402
+import data_store  # noqa: E402
 
-ID_COLS    = ["unit_number", "time_cycles"]
-LABEL_COLS = ["RUL", "failure_within_horizon"]
+PROJECT, DATASET, BUCKET = "project-c3e3f3ae-71cf-45cb-800", "pdm", "pdm-models-363641793280"
+RUL_CAP = 125
 
 
-def load_data():
-    train = pd.read_parquet(PROC / "train_FD001_features.parquet")
-    test  = pd.read_parquet(PROC / "test_FD001_features.parquet")
-    features = [c for c in train.columns if c not in ID_COLS + LABEL_COLS]
-    return train, test, features
+def _split(train):
+    units = np.sort(train.unit_number.unique())
+    val = np.random.default_rng(42).choice(units, size=len(units) // 5, replace=False)
+    return train[~train.unit_number.isin(val)], train[train.unit_number.isin(val)]
 
 
-def train_rul(train, test, features):
-    X_tr, y_tr = train[features], train["RUL"]
+def train_rul(tr, va, test):
+    m = xgb.XGBRegressor(n_estimators=1500, max_depth=6, learning_rate=0.05, subsample=0.8,
+                         colsample_bytree=0.8, tree_method="hist", early_stopping_rounds=50,
+                         random_state=42, n_jobs=-1)
+    m.fit(tr[FEATURES], tr["RUL"], eval_set=[(va[FEATURES], va["RUL"])], verbose=False)
     last = test.groupby("unit_number").tail(1)
-    X_te, y_te = last[features], last["RUL"]
-    model = xgb.XGBRegressor(
-        n_estimators=500, max_depth=6, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8,
-        random_state=42, early_stopping_rounds=50,
-    )
-    model.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
-    pred  = np.clip(model.predict(X_te), 0, 125)
-    rmse  = float(np.sqrt(mean_squared_error(y_te, pred)))
-    return {"model": model, "features": features}, {"rmse": round(rmse, 4)}
+    err = np.clip(m.predict(last[FEATURES]), 0, RUL_CAP) - last["RUL"].values
+    return ({"model": m, "features": FEATURES, "space": SPACE},
+            {"rmse": round(float(np.sqrt(np.mean(err ** 2))), 2),
+             "mae": round(float(np.mean(np.abs(err))), 2), "space": SPACE})
 
 
-def train_failure(train, test, features):
-    X_tr, y_tr = train[features], train["failure_within_horizon"]
-    X_te, y_te = test[features],  test["failure_within_horizon"]
-    pos_weight  = (y_tr == 0).sum() / (y_tr == 1).sum()
-    model = xgb.XGBClassifier(
-        n_estimators=400, max_depth=5, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8,
-        scale_pos_weight=pos_weight, eval_metric="aucpr",
-        random_state=42, early_stopping_rounds=50,
-    )
-    model.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
-    proba = model.predict_proba(X_te)[:, 1]
-    auc   = float(roc_auc_score(y_te, proba))
-    return {"model": model, "features": features, "threshold": 0.5}, {"roc_auc": round(auc, 4)}
+def train_failure(tr, va, test):
+    pos = tr["failure_within_horizon"].mean()
+    m = xgb.XGBClassifier(n_estimators=1000, max_depth=5, learning_rate=0.05, subsample=0.8,
+                          colsample_bytree=0.8, tree_method="hist", scale_pos_weight=(1 - pos) / pos,
+                          eval_metric="aucpr", early_stopping_rounds=50, random_state=42, n_jobs=-1)
+    m.fit(tr[FEATURES], tr["failure_within_horizon"],
+          eval_set=[(va[FEATURES], va["failure_within_horizon"])], verbose=False)
+    auc = roc_auc_score(test["failure_within_horizon"], m.predict_proba(test[FEATURES])[:, 1])
+    return ({"model": m, "features": FEATURES, "threshold": 0.5, "space": SPACE},
+            {"roc_auc": round(float(auc), 4), "space": SPACE})
 
 
-def get_production_metrics(model_name):
-    """Read current production metrics from model_registry."""
-    try:
-        from google.cloud import bigquery
-        client = bigquery.Client(project=PROJECT)
-        rows = list(client.query(
-            f"SELECT metrics FROM `{PROJECT}.{DATASET}.model_registry` "
-            f"WHERE model_name='{model_name}' AND status='production' ORDER BY trained_at DESC LIMIT 1"
-        ).result())
-        if rows:
-            m = rows[0].metrics
-            return m if isinstance(m, dict) else json.loads(m)
-    except Exception as e:
-        print(f"  could not read registry: {e}")
-    return {}
+def production(model_name):
+    from google.cloud import bigquery
+    rows = list(bigquery.Client(project=PROJECT).query(
+        f"SELECT version, metrics FROM `{PROJECT}.{DATASET}.model_registry` "
+        f"WHERE model_name='{model_name}' AND status='production' AND artifact_uri != '' "
+        f"ORDER BY trained_at DESC LIMIT 1").result())
+    if not rows:
+        return None, {}
+    m = rows[0].metrics
+    return rows[0].version, (m if isinstance(m, dict) else json.loads(m or "{}"))
 
 
-def upload_to_gcs(bundle, model_name, version):
-    """Upload retrained model to Cloud Storage."""
+def upload(bundle, name, version):
     from google.cloud import storage
-    client = storage.Client(project=PROJECT)
     buf = io.BytesIO()
     joblib.dump(bundle, buf)
     buf.seek(0)
-    path = f"models/{model_name}/{version}/model.pkl"
-    client.bucket(BUCKET).blob(path).upload_from_file(buf)
+    path = f"models/{name}/{version}/model.pkl"
+    storage.Client(project=PROJECT).bucket(BUCKET).blob(path).upload_from_file(buf, timeout=600)
     return f"gs://{BUCKET}/{path}"
 
 
-def update_registry(model_name, version, metrics, artifact_uri, status):
-    """Insert new version into model_registry."""
+def register(name, version, metrics, uri):
     from google.cloud import bigquery
-    client = bigquery.Client(project=PROJECT)
-    row = {
-        "version_id":   f"{model_name}-{version}",
-        "model_name":   model_name,
-        "version":      version,
-        "trained_at":   datetime.now(timezone.utc).isoformat(),
-        "metrics":      json.dumps(metrics),
-        "artifact_uri": artifact_uri,
-        "status":       status,
-    }
-    client.insert_rows_json(f"{PROJECT}.{DATASET}.model_registry", [row])
-    print(f"  registry: {model_name} {version} -> {status}")
+    err = bigquery.Client(project=PROJECT).insert_rows_json(f"{PROJECT}.{DATASET}.model_registry", [{
+        "version_id": f"{name}-{version}", "model_name": name, "version": version,
+        "trained_at": datetime.now(timezone.utc).isoformat(), "metrics": json.dumps(metrics),
+        "artifact_uri": uri, "status": "production"}])
+    if err:
+        raise RuntimeError(f"registry insert failed: {err}")
 
 
 def retrain_and_validate():
-    print("\nMLOps Retraining Pipeline")
-    print("=" * 50)
-
-    train, test, features = load_data()
-    version = f"v{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
-
+    print("\nMLOps retraining pipeline (v3 feature space)\n" + "=" * 50)
+    train, test = data_store.load("train"), data_store.load("test")
+    tr, va = _split(train)
+    version = "v3-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
     results = {}
-    for model_name, train_fn, metric_key, better_fn in [
-        ("rul_xgboost",     train_rul,     "rmse",    lambda n, o: n < o),
-        ("failure_xgboost", train_failure, "roc_auc", lambda n, o: n > o),
-    ]:
-        print(f"\n[{model_name}]")
-        bundle, new_metrics = train_fn(train, test, features)
-        new_val = new_metrics[metric_key]
-        print(f"  new   {metric_key}: {new_val}")
-
-        prod = get_production_metrics(model_name)
-        old_val = prod.get(metric_key)
-        print(f"  prod  {metric_key}: {old_val}")
-
-        if old_val is None or better_fn(new_val, float(old_val)):
-            print(f"  decision: PROMOTE (new is better)")
-            uri = upload_to_gcs(bundle, model_name, version)
-            update_registry(model_name, version, new_metrics, uri, "production")
-            status = "promoted"
-        else:
-            print(f"  decision: REJECT (production is better)")
+    for name, fn, key, better in (("rul_xgboost", train_rul, "rmse", lambda n, o: n < o),
+                                  ("failure_xgboost", train_failure, "roc_auc", lambda n, o: n > o)):
+        bundle, metrics = fn(tr, va, test)
+        prod_version, prod = production(name)
+        print(f"[{name}] candidate {key}={metrics[key]}  production {prod_version} "
+              f"{key}={prod.get(key)} space={prod.get('space')}")
+        if prod_version is not None and prod.get("space") != SPACE:
+            status = "rejected (production uses a different feature space)"
+        elif prod.get(key) is not None and not better(metrics[key], float(prod[key])):
             status = "rejected"
-
-        results[model_name] = {"metrics": new_metrics, "status": status}
-
-    print("\nRetraining complete.")
-    for name, r in results.items():
-        print(f"  {name}: {r['status']} {r['metrics']}")
+        else:
+            register(name, version, metrics, upload(bundle, name, version))
+            status = "promoted"
+        print(f"  decision: {status}")
+        results[name] = {"status": status, "metrics": metrics}
     return results
 
 
