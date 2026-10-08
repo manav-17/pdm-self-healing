@@ -91,7 +91,7 @@ diagnosis. Do not invent numbers not given.
 
 Machine: {machine_id}, operating cycle {cycle}
 Anomaly score (0-1, higher = more abnormal): {anomaly_score:.3f}
-Failure probability within 30 cycles: {failure_probability:.3f}
+Failure probability within 30 cycles: {failure_probability:.1%}
 Estimated Remaining Useful Life: {rul_estimate:.0f} cycles
 Most influential sensors: {', '.join(top_sensors[:5]) or 'none'}
 
@@ -99,7 +99,7 @@ Context: NASA C-MAPSS FD001, whose documented fault mode is
 High-Pressure Compressor (HPC) degradation.
 
 Reply with exactly 2-3 sentences describing the engine's condition and what
-the signals indicate. No preamble, no bullet points."""
+the signals indicate. No preamble, no bullet points. Do not repeat the numeric values above; the operator already sees them next to your text."""
 
     from concurrent.futures import ThreadPoolExecutor
     pool = ThreadPoolExecutor(max_workers=1)
