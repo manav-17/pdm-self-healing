@@ -37,7 +37,13 @@ def _insert(table, rows):
     c = client()
     if c is None:
         return False
-    errors = c.insert_rows_json(f"{PROJECT}.{DATASET}.{table}", rows)
+    try:
+        from google.cloud.bigquery import DEFAULT_RETRY
+        errors = c.insert_rows_json(f"{PROJECT}.{DATASET}.{table}", rows,
+                                    retry=DEFAULT_RETRY.with_deadline(45), timeout=20)
+    except Exception as e:
+        print(f"[storage] insert skipped on {table}: {type(e).__name__}")
+        return False
     if errors:
         print(f"[storage] insert errors on {table}: {errors}")
         return False

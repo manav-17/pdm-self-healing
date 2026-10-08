@@ -5,13 +5,20 @@ predictions are written to BigQuery. Decisions at or above the escalation
 threshold are submitted to the API (local or Cloud Run), which stores them
 and places them in the operator's approval queue.
 
+MQTT receipt is decoupled from processing: the MQTT callback only places
+each message on an in-memory queue, and one worker thread processes the
+queue in order. Slow stages (BigQuery writes, LLM calls, API calls) therefore
+never block the MQTT network loop, which would otherwise make the broker drop
+the connection and discard queued messages.
+
 With USE_LLM=true, the LLM diagnosis is requested only for escalated
-decisions. The risk score is deterministic and never depends on the LLM,
-so routine LOW-risk cycles don't need an LLM explanation.
+decisions. The risk score is deterministic and never depends on the LLM.
 """
 import json
 import os
+import queue
 import sys
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -43,23 +50,38 @@ class Pipeline:
         self.run_id = uuid.uuid4().hex[:8]
         self.windows = defaultdict(RollingWindow)
         self.stats = defaultdict(int)
+        self.inbox = queue.Queue()
         self.last_llm = 0.0
         self.headers = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
         OUT.parent.mkdir(exist_ok=True)
         self.sink = OUT.open("a")
-        print(f"run_id={self.run_id}  LLM={'on (escalated only)' if USE_LLM else 'off'}  API={API}", flush=True)
+        print(f"run_id={self.run_id}  LLM={'on (escalated only)' if USE_LLM else 'off'}  "
+              f"model={os.getenv('GEMINI_MODEL', 'default')}  API={API}", flush=True)
 
     def on_connect(self, client, userdata, flags, rc, properties=None):
         print(f"Connected (rc={rc}); subscribing to {TOPIC}\n", flush=True)
         client.subscribe(TOPIC, qos=1)
 
     def on_message(self, client, userdata, msg):
+        self.inbox.put((msg.topic, msg.payload))
+
+    def worker(self):
+        while True:
+            topic, payload = self.inbox.get()
+            try:
+                self.process(topic, payload)
+            except Exception as e:
+                self.stats["errors"] += 1
+                print(f"ERROR processing message on {topic}: {type(e).__name__}: {e}", flush=True)
+
+    def process(self, topic, payload):
         self.stats["received"] += 1
+        t0 = time.time()
         try:
-            reading = SensorReading(**json.loads(msg.payload.decode()))
+            reading = SensorReading(**json.loads(payload.decode()))
         except (ValidationError, json.JSONDecodeError, UnicodeDecodeError) as e:
             self.stats["rejected"] += 1
-            print(f"REJECTED on {msg.topic}: {type(e).__name__}", flush=True)
+            print(f"REJECTED on {topic}: {type(e).__name__}", flush=True)
             return
 
         storage.save_raw(reading.machine_id, reading.cycle, reading.sensors)
@@ -92,7 +114,8 @@ class Pipeline:
         print(f"{decision.machine_id} c{decision.cycle:>3} | "
               f"RUL={pred['rul_estimate']:>5.1f} P(fail)={pred['failure_probability']:.3f} "
               f"anom={pred['anomaly_score']:.3f} | risk={decision.risk_score:.3f} "
-              f"{decision.risk_level:<6} | {decision.recommended_action:<21}{note}", flush=True)
+              f"{decision.risk_level:<6} | {decision.recommended_action:<21} "
+              f"{time.time() - t0:5.1f}s  waiting={self.inbox.qsize():<3}{note}", flush=True)
 
     def _escalate(self, row):
         try:
@@ -106,6 +129,7 @@ class Pipeline:
             return f"  -> API error {code} ({type(e).__name__})"
 
     def run(self):
+        threading.Thread(target=self.worker, daemon=True).start()
         c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         c.on_connect = self.on_connect
         c.on_message = self.on_message

@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 TIMEOUT_S = 10
 
 
@@ -101,10 +101,11 @@ High-Pressure Compressor (HPC) degradation.
 Reply with exactly 2-3 sentences describing the engine's condition and what
 the signals indicate. No preamble, no bullet points."""
 
-    resp = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=prompt,
-    )
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(max_workers=1)
+    fut = pool.submit(client.models.generate_content, model=MODEL_NAME, contents=prompt)
+    pool.shutdown(wait=False)
+    resp = fut.result(timeout=TIMEOUT_S)
     text = (resp.text or "").strip()
     if not text:
         raise RuntimeError("empty LLM response")
