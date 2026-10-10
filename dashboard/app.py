@@ -14,6 +14,7 @@ Local run:
 """
 import hmac
 import json
+import re
 import os
 import sys
 
@@ -64,20 +65,36 @@ html, body, .stApp, [class*="css"], button, input, textarea, select, label, p, l
 .dot.off {{ background: {RISK['HIGH']}; }}
 
 /* tabs as a segmented switch */
-.stTabs [data-baseweb="tab-list"] {{ gap: .3rem; background: {CARD}; border: 1px solid {RULE};
+.stTabs [role="tablist"] {{ gap: .3rem !important; background: {CARD}; border: 1px solid {RULE} !important;
   border-radius: 14px; padding: .35rem; width: fit-content; max-width: 100%;
   box-shadow: 0 4px 14px -8px rgba(27,34,64,.18); margin-bottom: .4rem; }}
-.stTabs button[data-baseweb="tab"] {{ height: auto !important; padding: .6rem 1.25rem !important;
+.stTabs [role="tablist"] > div:not(:has([role="tab"])) {{ display: none !important; }}
+.stTabs [role="tab"] {{ height: auto !important; padding: .6rem 1.25rem !important; margin: 0 !important;
   border: none !important; border-radius: 10px !important; background: transparent !important;
   color: {MUTED} !important; transition: background .15s ease, color .15s ease; }}
-.stTabs button[data-baseweb="tab"] p {{ font-size: .95rem !important; font-weight: 600 !important;
+.stTabs [role="tab"] p, .stTabs [role="tab"] span {{ font-size: .95rem !important; font-weight: 600 !important;
   color: inherit !important; margin: 0 !important; }}
-.stTabs button[data-baseweb="tab"]:hover {{ background: #EEF0FB !important; color: {INK} !important; }}
-.stTabs button[data-baseweb="tab"][aria-selected="true"] {{
+.stTabs [role="tab"]:hover {{ background: #EEF0FB !important; color: {INK} !important; }}
+.stTabs [role="tab"][aria-selected="true"] {{
   background: linear-gradient(135deg, {STEEL} 0%, #6A5AE0 100%) !important; color: #FFFFFF !important;
   box-shadow: 0 6px 16px -6px rgba(76,91,212,.55); }}
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none !important; }}
-.stTabs [data-baseweb="tab-panel"] {{ padding-top: .6rem; }}
+.stTabs [role="tabpanel"] {{ padding-top: .6rem; }}
+
+/* segmented control (risk filter) + focus rings: indigo instead of default red */
+button[data-testid="stBaseButton-segmented_control"], button[kind="segmented_control"] {{
+  background: {CARD} !important; color: {MUTED} !important; border-color: {RULE} !important; }}
+button[data-testid="stBaseButton-segmented_controlActive"], button[kind="segmented_controlActive"] {{
+  background: #EEF0FD !important; color: {STEEL} !important; border-color: {STEEL} !important;
+  font-weight: 600 !important; }}
+button[data-testid^="stBaseButton-segmented_control"] p {{ color: inherit !important; }}
+[data-baseweb="select"] > div:focus-within, [data-baseweb="input"]:focus-within {{
+  border-color: {STEEL} !important; box-shadow: 0 0 0 1px {STEEL} !important; }}
+.srcbadge {{ display: inline-block; padding: .08rem .5rem; border-radius: 999px; font: 700 .66rem 'JetBrains Mono', monospace;
+  letter-spacing: .06em; text-transform: uppercase; margin-left: .35rem; vertical-align: middle; }}
+.srcbadge.llm {{ background: #EEF0FD; color: {STEEL}; border: 1px solid #C9CEF5; }}
+.srcbadge.template {{ background: #FFF4E2; color: #A86A12; border: 1px solid #F3D9A8; }}
+.srcbadge.auto {{ background: #F0F2F6; color: {MUTED}; border: 1px solid {RULE}; }}
 
 /* decision ticket */
 .ticket {{ background: {CARD}; border: 1px solid {RULE}; border-radius: 12px; overflow: hidden;
@@ -384,6 +401,46 @@ def auto_summary(mid, cycle, p, rul, an):
             f"{'clearly' if an >= 0.6 else 'mildly' if an >= 0.4 else 'not'} abnormal.")
 
 
+TEMPLATE_RE = re.compile(r"Anomaly score [0-9.]+, failure probability [0-9.]+, estimated RUL", re.I)
+
+
+def find_key(obj, keys, depth=0):
+    if depth > 5 or obj is None:
+        return None
+    if isinstance(obj, str):
+        d = as_dict(obj)
+        return find_key(d, keys, depth + 1) if d else None
+    if isinstance(obj, list):
+        for v in obj:
+            r = find_key(v, keys, depth + 1)
+            if r is not None:
+                return r
+        return None
+    if isinstance(obj, dict):
+        for k in keys:
+            if obj.get(k) not in (None, ""):
+                return obj[k]
+        for v in obj.values():
+            r = find_key(v, keys, depth + 1)
+            if r is not None:
+                return r
+    return None
+
+
+def detect_source(item, summary):
+    """'llm' or 'template': use the stored flag if present, otherwise recognise the
+    diagnosis agent's fixed template sentence."""
+    v = find_key(item, ("source", "diagnosis_source", "diag_source"))
+    if isinstance(v, str) and v.strip().lower() in ("llm", "template", "gemini"):
+        return "llm" if v.strip().lower() in ("llm", "gemini") else "template"
+    flag = find_key(item, ("llm_used", "used_llm"))
+    if isinstance(flag, bool):
+        return "llm" if flag else "template"
+    if summary:
+        return "template" if TEMPLATE_RE.search(summary) else "llm"
+    return ""
+
+
 def fields(item):
     diag = deep_get(item, "diagnosis")
     dd = as_dict(diag)
@@ -403,7 +460,7 @@ def fields(item):
         anom=deep_get(item, "anomaly_score"), summary=summary,
         mode=dd.get("likely_failure_mode") or deep_get(item, "likely_failure_mode", default=""),
         conf=dd.get("confidence") or deep_get(item, "confidence", default=""),
-        src=("auto summary" if auto else dd.get("source") or deep_get(item, "source", default="")))
+        src=("auto" if auto else detect_source(item, summary)))
 
 
 # ======================================================================= top band
@@ -438,8 +495,11 @@ def ticket_html(x):
                  f'<div class="legend">{leg}<span>| ticks = MEDIUM 0.40 · HIGH 0.70</span></div>')
     except Exception:
         pass
-    meta = " · ".join(s for s in [x["mode"], f"confidence {x['conf']}" if x["conf"] else "",
-                                  f"diagnosis by {x['src']}" if x["src"] else ""] if s)
+    meta = " · ".join(s for s in [x["mode"], f"confidence {x['conf']}" if x["conf"] else ""] if s)
+    badge = {"llm": ("llm", "Gemini LLM"), "template": ("template", "Template fallback"),
+             "auto": ("auto", "Auto summary")}.get(x["src"])
+    if badge:
+        meta += f'<span class="srcbadge {badge[0]}">{badge[1]}</span>'
     return f"""<div class="ticket">
       <div class="head">
         <div class="lvl" style="background:{color}">{lvl}</div>
@@ -608,7 +668,9 @@ def view_history():
         f = fields(row.to_dict())
         o = outcome.get(f["did"], ("PENDING", ""))
         rows.append({"Cycle": f["cycle"], "Risk": f["level"], "Score": f["score"], "Action": f["action"],
-                     "Diagnosis": f["summary"], "Decision": o[0] or "PENDING", "By": o[1]})
+                     "Diagnosis": f["summary"],
+                     "Written by": {"llm": "Gemini LLM", "template": "Template", "auto": "Auto"}.get(f["src"], ""),
+                     "Decision": o[0] or "PENDING", "By": o[1]})
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True, column_config={
         "Score": st.column_config.NumberColumn(format="%.2f"),
         "Diagnosis": st.column_config.TextColumn(width="large")})
