@@ -150,17 +150,34 @@ def _secret(name):
         return None
 
 
-@st.cache_resource(show_spinner=False)
-def expected_password():
-    return os.getenv("DASHBOARD_PASSWORD") or _secret("dashboard-password")
+@st.cache_resource(ttl=300, show_spinner=False)
+def user_accounts():
+    """username -> password.
+
+    Read from the Secret Manager secret `dashboard-users`, a JSON object such as
+    {"manav": "...", "reviewer": "..."}  (or env DASHBOARD_USERS for local runs).
+    """
+    raw = os.getenv("DASHBOARD_USERS") or _secret("dashboard-users")
+    try:
+        users = json.loads(raw) if raw else {}
+        return {str(k).strip().lower(): str(v) for k, v in users.items() if str(v)}
+    except Exception:
+        return {}
+
+
+def check_login(username, password):
+    users = user_accounts()
+    expected = users.get(username.strip().lower())
+    # always compare, even for unknown users, so timing does not reveal valid usernames
+    ok = hmac.compare_digest(password.encode(), (expected or "\x00invalid").encode())
+    return ok and expected is not None
 
 
 def password_gate():
     if st.session_state.get("authed"):
         return
-    expected = expected_password()
-    if not expected:
-        st.error("Dashboard password is not configured.")
+    if not user_accounts():
+        st.error("No user accounts configured. Create the `dashboard-users` secret in Secret Manager.")
         st.stop()
     _, mid, _ = st.columns([1, 1.1, 1])
     with mid:
@@ -169,15 +186,15 @@ def password_gate():
             <div class="s">Restricted · operator access</div>
             <div class="t">PdM Operator Console</div></div>""", unsafe_allow_html=True)
         with st.form("login"):
-            name = st.text_input("Your name", value="operator")
+            user = st.text_input("Username", placeholder="your username")
             pw = st.text_input("Password", type="password")
             ok = st.form_submit_button("Sign in", type="primary", use_container_width=True)
         if ok:
-            if hmac.compare_digest(pw.encode(), expected.encode()):
+            if user.strip() and check_login(user, pw):
                 st.session_state["authed"] = True
-                st.session_state["approver"] = name.strip() or "operator"
+                st.session_state["approver"] = user.strip().lower()
                 st.rerun()
-            st.error("Incorrect password.")
+            st.error("Incorrect username or password.")
     st.stop()
 
 
@@ -316,11 +333,67 @@ def risk_of(p, rul, anom):
         return s, ("HIGH" if s >= 0.7 else "MEDIUM" if s >= 0.4 else "LOW")
 
 
+TEXT_KEYS = ("summary", "diagnosis_summary", "diagnosis_text", "explanation", "narrative", "text")
+
+
+def find_text(obj, depth=0):
+    """Search any depth (dicts, lists, JSON strings) for the diagnosis sentence."""
+    if depth > 5 or obj is None:
+        return ""
+    if isinstance(obj, str):
+        d = as_dict(obj)
+        if d:
+            return find_text(d, depth + 1)
+        if obj.strip().startswith("["):
+            try:
+                return find_text(json.loads(obj), depth + 1)
+            except Exception:
+                return ""
+        return ""
+    if isinstance(obj, list):
+        for v in obj:
+            t = find_text(v, depth + 1)
+            if t:
+                return t
+        return ""
+    if isinstance(obj, dict):
+        for k in TEXT_KEYS:
+            v = obj.get(k)
+            if isinstance(v, str) and len(v.strip()) > 15 and not v.strip().startswith(("{", "[")):
+                return v.strip()
+        d = obj.get("diagnosis")
+        if isinstance(d, str) and len(d.strip()) > 15 and not d.strip().startswith(("{", "[")):
+            return d.strip()
+        for v in obj.values():
+            t = find_text(v, depth + 1)
+            if t:
+                return t
+    return ""
+
+
+def auto_summary(mid, cycle, p, rul, an):
+    """Readable fallback built from the model outputs when no text was stored."""
+    try:
+        p, rul, an = float(p), float(rul), float(an)
+    except Exception:
+        return ""
+    state = ("advanced degradation" if p >= 0.7 or rul <= 20 else
+             "progressing degradation" if p >= 0.3 or rul <= 60 else "early signs of wear")
+    return (f"{mid} at cycle {cycle} shows {state}: about {rul:.0f} cycle{'' if round(rul) == 1 else 's'} of useful life remain{'s' if round(rul) == 1 else ''}, "
+            f"a {p:.0%} chance of failure within 30 cycles, and sensor behaviour that is "
+            f"{'clearly' if an >= 0.6 else 'mildly' if an >= 0.4 else 'not'} abnormal.")
+
+
 def fields(item):
     diag = deep_get(item, "diagnosis")
     dd = as_dict(diag)
-    summary = dd.get("summary") or (diag if isinstance(diag, str) and not dd else "") \
-        or deep_get(item, "summary", default="")
+    summary = find_text(item)
+    auto = False
+    if not summary:
+        summary = auto_summary(deep_get(item, "machine_id"), deep_get(item, "cycle"),
+                               deep_get(item, "failure_probability"), deep_get(item, "rul_estimate", "rul"),
+                               deep_get(item, "anomaly_score"))
+        auto = bool(summary)
     return dict(
         did=deep_get(item, "decision_id", "id"), mid=deep_get(item, "machine_id"),
         cycle=deep_get(item, "cycle"), level=str(deep_get(item, "risk_level", default="")).upper(),
@@ -330,7 +403,7 @@ def fields(item):
         anom=deep_get(item, "anomaly_score"), summary=summary,
         mode=dd.get("likely_failure_mode") or deep_get(item, "likely_failure_mode", default=""),
         conf=dd.get("confidence") or deep_get(item, "confidence", default=""),
-        src=dd.get("source") or deep_get(item, "source", default=""))
+        src=("auto summary" if auto else dd.get("source") or deep_get(item, "source", default="")))
 
 
 # ======================================================================= top band
