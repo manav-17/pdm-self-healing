@@ -652,22 +652,37 @@ def view_history():
                 unsafe_allow_html=True)
 
     st.markdown('<div class="section">Remaining useful life and risk</div>', unsafe_allow_html=True)
-    base = alt.Chart(m).encode(x=alt.X("cycle:Q", title="Operating cycle"))
-    rul = base.mark_area(line={"color": STEEL, "strokeWidth": 2}, color=alt.Gradient(
-        gradient="linear", x1=1, x2=1, y1=1, y2=0,
-        stops=[alt.GradientStop(color="rgba(76,91,212,0.02)", offset=0),
-               alt.GradientStop(color="rgba(76,91,212,0.22)", offset=1)])).encode(
-        y=alt.Y("rul:Q", title="RUL (cycles)"),
-        tooltip=["cycle", alt.Tooltip("rul:Q", format=".0f", title="RUL")])
-    bands = alt.Chart(pd.DataFrame({"a": [0, .4, .7], "b": [.4, .7, 1], "l": list(RISK)})).mark_rect(
-        opacity=.13).encode(y="a:Q", y2="b:Q", color=alt.Color(
-            "l:N", scale=alt.Scale(domain=list(RISK), range=list(RISK.values())), legend=None))
-    risk = base.mark_line(color=INK, strokeWidth=2).encode(
-        y=alt.Y("risk:Q", title="Risk score", scale=alt.Scale(domain=[0, 1])),
-        tooltip=["cycle", alt.Tooltip("risk:Q", format=".2f"), "level"])
+    # plain, typed frame: Vega-Lite silently draws nothing if a column holds Decimals, dicts or lists
+    c = pd.DataFrame({
+        "cycle": pd.to_numeric(m["cycle"], errors="coerce"),
+        "rul": pd.to_numeric(m["rul"], errors="coerce").astype(float),
+        "risk": pd.to_numeric(m["risk"], errors="coerce").astype(float),
+        "level": m["level"].astype(str),
+    }).dropna(subset=["cycle"]).astype({"cycle": int})
+    x0, x1 = int(c["cycle"].min()), int(c["cycle"].max())
+    xenc = alt.X("cycle:Q", title="Operating cycle", scale=alt.Scale(domain=[x0, x1]))
+
+    rul_area = alt.Chart(c).mark_area(color=STEEL, opacity=0.12).encode(x=xenc, y=alt.Y("rul:Q", title="RUL (cycles)"))
+    rul_line = alt.Chart(c).mark_line(color=STEEL, strokeWidth=2.2).encode(
+        x=xenc, y="rul:Q", tooltip=[alt.Tooltip("cycle:Q", title="Cycle"),
+                                    alt.Tooltip("rul:Q", format=".0f", title="RUL")])
+    bands_df = pd.DataFrame({"x0": [x0] * 3, "x1": [x1] * 3, "y0": [0, .4, .7], "y1": [.4, .7, 1.0],
+                             "level": list(RISK)})
+    bands = alt.Chart(bands_df).mark_rect(opacity=0.14).encode(
+        x="x0:Q", x2="x1:Q", y="y0:Q", y2="y1:Q",
+        color=alt.Color("level:N", scale=alt.Scale(domain=list(RISK), range=list(RISK.values())), legend=None))
+    risk_line = alt.Chart(c).mark_line(color=INK, strokeWidth=2.2).encode(
+        x=xenc, y=alt.Y("risk:Q", title="Risk score", scale=alt.Scale(domain=[0, 1])),
+        tooltip=[alt.Tooltip("cycle:Q", title="Cycle"), alt.Tooltip("risk:Q", format=".2f", title="Risk"),
+                 alt.Tooltip("level:N", title="Level")])
+
     l, r = st.columns(2)
-    l.altair_chart(rul.properties(height=250), use_container_width=True)
-    r.altair_chart((bands + risk).properties(height=250), use_container_width=True)
+    with l:
+        st.caption("Remaining useful life (cycles)")
+        st.altair_chart((rul_area + rul_line).properties(height=260), use_container_width=True)
+    with r:
+        st.caption("Risk score against the LOW / MEDIUM / HIGH bands")
+        st.altair_chart((bands + risk_line).properties(height=260), use_container_width=True)
 
     st.markdown('<div class="section">Decisions taken on this engine</div>', unsafe_allow_html=True)
     d, _ = query(f"SELECT * FROM {T('agent_decisions')} WHERE machine_id = @m", {"m": mid})
