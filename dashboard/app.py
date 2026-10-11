@@ -33,6 +33,10 @@ RISK = {"LOW": "#2E9E73", "MEDIUM": "#E8A33D", "HIGH": "#E25C55"}
 INK, PAPER, RULE, MUTED, STEEL = "#1B2240", "#F6F7FB", "#E3E6F0", "#6B7393", "#4C5BD4"
 NAVY, CARD, ACCENT = "#161C3A", "#FFFFFF", "#8B9BFF"
 
+try:  # accent colour for built-in widgets; harmless if this Streamlit version ignores it
+    st._config.set_option("theme.primaryColor", "#4C5BD4")
+except Exception:
+    pass
 st.set_page_config(page_title="PdM Operator Console", page_icon="🛠️", layout="wide",
                    initial_sidebar_state="collapsed")
 
@@ -148,7 +152,27 @@ button[data-testid^="stBaseButton-segmented_control"] p {{ color: inherit !impor
 button[kind="primary"], button[data-testid="stBaseButton-primary"] {{
   background: {STEEL} !important; border: 1px solid {STEEL} !important; color: #FFFFFF !important; font-weight: 600; }}
 button[kind="secondary"], button[data-testid="stBaseButton-secondary"] {{
-  background: {CARD} !important; border: 1px solid {RISK['HIGH']} !important; color: {RISK['HIGH']} !important; font-weight: 600; }}
+  background: {CARD} !important; border: 1px solid {RULE} !important; color: {INK} !important; font-weight: 600; }}
+button[kind="secondary"]:hover, button[data-testid="stBaseButton-secondary"]:hover {{
+  border-color: {STEEL} !important; color: {STEEL} !important; }}
+[class*="st-key-REJECTED_"] button {{ border-color: {RISK['HIGH']} !important; color: {RISK['HIGH']} !important; }}
+[class*="st-key-REJECTED_"] button:hover {{ background: #FDECEC !important; }}
+
+/* view switcher (buttons, so it renders the same on every Streamlit version) */
+[class*="st-key-nav_"] button {{ border-radius: 12px !important; padding: .65rem 1rem !important; }}
+[class*="st-key-nav_"] button p {{ font-size: .98rem !important; font-weight: 600 !important; }}
+[class*="st-key-nav_"] button[kind="primary"], [class*="st-key-nav_"] button[data-testid="stBaseButton-primary"] {{
+  background: linear-gradient(135deg, {STEEL} 0%, #6A5AE0 100%) !important; border: none !important;
+  box-shadow: 0 6px 16px -6px rgba(76,91,212,.55); }}
+[class*="st-key-nav_"] button[kind="secondary"], [class*="st-key-nav_"] button[data-testid="stBaseButton-secondary"] {{
+  color: {MUTED} !important; }}
+
+/* risk-level filter: indigo instead of the default red */
+[class*="st-key-risk_filter"] button {{ border-color: {RULE} !important; color: {MUTED} !important; background: {CARD} !important; }}
+[class*="st-key-risk_filter"] button[kind*="Active"], [class*="st-key-risk_filter"] button[data-testid*="Active"],
+[class*="st-key-risk_filter"] button[aria-checked="true"], [class*="st-key-risk_filter"] button[aria-pressed="true"] {{
+  background: #EEF0FD !important; color: {STEEL} !important; border-color: {STEEL} !important; }}
+[class*="st-key-risk_filter"] button p {{ color: inherit !important; }}
 @media (max-width: 760px) {{
   .ticket .head {{ flex-wrap: wrap; }} .ticket .nums {{ grid-template-columns: repeat(2, 1fr); width: 100%;
   border-left: none; border-top: 1.5px dashed {RULE}; }}
@@ -532,8 +556,7 @@ def view_queue(pending, err):
 
     counts = {k: sum(1 for x in items if x["level"] == k) for k in RISK}
     c1, c2, c3 = st.columns([1.3, 1.2, 1])
-    levels = c1.segmented_control(
-        "Risk level", ["HIGH", "MEDIUM", "LOW"], default=["HIGH", "MEDIUM"], selection_mode="multi",
+    levels = c1.segmented_control("Risk level", ["HIGH", "MEDIUM", "LOW"], key="risk_filter", default=["HIGH", "MEDIUM"], selection_mode="multi",
         format_func=lambda k: f"{k} · {counts[k]}")
     machines = sorted({str(x["mid"]) for x in items})
     eng = c2.selectbox("Engine", ["All engines"] + machines)
@@ -689,9 +712,18 @@ if out.button("Sign out", use_container_width=True):
     st.rerun()
 
 waiting = "" if pending is None else f"  ·  {len(pending)}"
-t1, t2 = st.tabs([f":material/pending_actions: Awaiting your decision{waiting}",
-                  ":material/monitoring: Machine history"])
-with t1:
-    view_queue(pending, perr)
-with t2:
+view = st.session_state.get("view", "queue")
+b1, b2, _ = st.columns([1.7, 1.3, 3.5])
+if b1.button(f"Awaiting your decision{waiting}", key="nav_queue", icon=":material/pending_actions:",
+             type="primary" if view == "queue" else "secondary", use_container_width=True):
+    st.session_state["view"] = "queue"
+    st.rerun()
+if b2.button("Machine history", key="nav_history", icon=":material/monitoring:",
+             type="primary" if view == "history" else "secondary", use_container_width=True):
+    st.session_state["view"] = "history"
+    st.rerun()
+st.write("")
+if view == "history":
     view_history()
+else:
+    view_queue(pending, perr)
