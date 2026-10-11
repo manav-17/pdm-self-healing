@@ -13,12 +13,16 @@ An end-to-end predictive-maintenance system for turbofan engines. It streams sen
 |---|---|---|
 | **Operator Console** (dashboard) | https://pdm-dashboard-necm52e4nq-el.a.run.app | Username and password |
 | **REST API** (FastAPI + agents) | https://pdm-api-363641793280.asia-south1.run.app | IAM-protected; a browser gets `403` by design |
-| Cloud Run services | [console.cloud.google.com/run](https://console.cloud.google.com/run?project=project-c3e3f3ae-71cf-45cb-800) | Project members |
-| BigQuery dataset `pdm` | [console.cloud.google.com/bigquery](https://console.cloud.google.com/bigquery?project=project-c3e3f3ae-71cf-45cb-800) | Project members |
-| CI/CD build history | [console.cloud.google.com/cloud-build](https://console.cloud.google.com/cloud-build/builds?project=project-c3e3f3ae-71cf-45cb-800) | Project members |
-| Nightly drift check | [console.cloud.google.com/cloudscheduler](https://console.cloud.google.com/cloudscheduler?project=project-c3e3f3ae-71cf-45cb-800) | Project members |
 
-Region: `asia-south1` (Mumbai)
+Hosted on Google Cloud Run, region `asia-south1` (Mumbai).
+
+---
+
+## Demo video
+
+▶ **Watch the demo:** [Demo video](PASTE_YOUR_VIDEO_LINK_HERE)
+
+The video shows a live engine streaming through the edge pipeline, Gemini diagnoses, risk scoring, approval in the Operator Console, the machine-history charts, and the Google Cloud services (Cloud Run, BigQuery, Cloud Build, Cloud Scheduler).
 
 ---
 
