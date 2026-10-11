@@ -128,8 +128,8 @@ button[data-testid^="stBaseButton-segmented_control"] p {{ color: inherit !impor
   color: {MUTED}; margin-top: .35rem; }}
 .legend i {{ display: inline-block; width: .6rem; height: .6rem; border-radius: 2px; margin-right: .3rem;
   vertical-align: middle; }}
-.marks {{ position: relative; height: 0; }}
-.marks b {{ position: absolute; top: -12px; width: 2px; height: 12px; background: {NAVY}; opacity: .6; }}
+.tickmarks {{ position: relative; height: 0; }}
+.tickmarks b {{ position: absolute; top: -12px; width: 2px; height: 12px; background: {NAVY}; opacity: .6; }}
 
 /* machine history */
 .strip {{ display: flex; height: 26px; border: 1px solid {RULE}; border-radius: 6px; overflow: hidden; }}
@@ -515,7 +515,7 @@ def ticket_html(x):
         bars = "".join(f'<span style="width:{w*100:.1f}%;background:{c}"></span>' for w, c, _ in parts)
         leg = "".join(f'<span><i style="background:{c}"></i>{t} = {w:.2f}</span>' for w, c, t in parts)
         stack = (f'<div class="stack">{bars}</div>'
-                 f'<div class="marks"><b style="left:40%"></b><b style="left:70%"></b></div>'
+                 f'<div class="tickmarks"><b style="left:40%"></b><b style="left:70%"></b></div>'
                  f'<div class="legend">{leg}<span>| ticks = MEDIUM 0.40 · HIGH 0.70</span></div>')
     except Exception:
         pass
