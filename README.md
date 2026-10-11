@@ -20,7 +20,7 @@ Hosted on Google Cloud Run, region `asia-south1` (Mumbai).
 
 ## Demo video
 
-▶ **Watch the demo:** [Demo video](PASTE_YOUR_VIDEO_LINK_HERE)
+▶ **Watch the demo:** (https://drive.google.com/file/d/1l3AyNacNFs7nPZnMliYzXrTmzJMTQWp3/view?usp=sharing))
 
 The video shows a live engine streaming through the edge pipeline, Gemini diagnoses, risk scoring, approval in the Operator Console, the machine-history charts, and the Google Cloud services (Cloud Run, BigQuery, Cloud Build, Cloud Scheduler).
 
